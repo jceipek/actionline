@@ -125,11 +125,14 @@ const enum FieldType {
 
 type ICommand = {
     type: CommandType.UpdateSelection
-    target: INode
+    targetIndex: number
+    targetList: INodeList
     to: boolean
 } | {
     type: CommandType.Update
-    target: INode
+    targetIndex: number
+    targetList: INodeList
+
     field: keyof INode
     fieldType: FieldType
     from: any
@@ -143,6 +146,7 @@ type ICommand = {
     name: string
     range: IVector2
     layer: number
+    selected: boolean
 };
 
 interface IUndoState {
@@ -211,23 +215,25 @@ function update_node_field (node: INode, field: keyof INode, type: FieldType, va
 function perform_command(command: ICommand, timeline: ITimeline, reverse: boolean) {
     switch (command.type) {
         case CommandType.UpdateSelection: {
+            let targetNode = command.targetList.items[command.targetIndex];
             if (!reverse) {
-                command.target.nodeInputState.selected = command.to;
+                targetNode.nodeInputState.selected = command.to;
             } else {
-                command.target.nodeInputState.selected = !command.to;
+                targetNode.nodeInputState.selected = !command.to;
             }
         } break;
         case CommandType.Update: {
+            let targetNode = command.targetList.items[command.targetIndex];
             if (!reverse) {
-                update_node_field(command.target, command.field, command.fieldType, command.to);
+                update_node_field(targetNode, command.field, command.fieldType, command.to);
             } else {
-                update_node_field(command.target, command.field, command.fieldType, command.from);
+                update_node_field(targetNode, command.field, command.fieldType, command.from);
             }
         } break;
         case CommandType.ChangeExistence: {
             let isCreate = (command.isCreate != reverse);
             if (isCreate) {
-                add_to_unordered_list(make_node(command.layer, command.name, command.range[0], command.range[1]), command.index,command.targetList);
+                add_to_unordered_list(make_node(command.layer, command.name, command.range[0], command.range[1], command.selected), command.index,command.targetList);
             } else {
                 remove_from_unordered_list(command.index, command.targetList);
             }
@@ -250,13 +256,13 @@ function set_vector2(vec, x, y) {
     vec[1] = y;
 }
 
-function make_node(layer, name, start, end): INode {
+function make_node(layer: number, name: string, start: number, end: number, selected: boolean): INode {
     return {
         name: name,
         range: make_vector2(start, end),
         layer: layer,
         nodeInputState: {
-            selected: false,
+            selected: selected,
             hovered: false
         }
     };
@@ -418,6 +424,11 @@ function handle_input(timeline: ITimeline) {
             // SELECT UNIQUE (overTarget)
             perform_new_command_group(`Unique Select ${overTarget.name}`, ip_push_select_uniquely_commands(overTarget, timeline, []), timeline);
         }
+
+        if (inputState.deleteModifier) {
+            // SELECT UNIQUE (overTarget)
+            perform_new_command_group(`Delete Selection`, ip_push_delete_selection_commands(timeline, []), timeline);
+        }
     }
 
     // Remove from selection while drag over and holding additiveModifier
@@ -432,7 +443,7 @@ function handle_input(timeline: ITimeline) {
         // Remove From Selection while hovering
         let [isOverSelected, selectedTarget] = is_pointer_over_selected(pointerPos, timeline);
         if (isOverSelected) {
-            perform_new_command_group(`Additive Deselect ${selectedTarget.name}`, ip_push_deselect_command(selectedTarget, []), timeline);
+            perform_new_command_group(`Additive Deselect ${selectedTarget.name}`, ip_push_deselect_command(selectedTarget, timeline, []), timeline);
         }
 
         // Exit Remove Mode
@@ -512,14 +523,14 @@ function handle_input(timeline: ITimeline) {
                 for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
                     let node = timeline.nodes.items[nodeIndex];
                     if (box_intersect_node_strict(pointerStartPos, pointerPos, node)) {
-                        ip_push_select_command(node, commands);
+                        ip_push_select_command(node, timeline, commands);
                     }
                 }
                 perform_new_command_group(`Additive Box Select`, commands, timeline);
             } else {
                 for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
                     let node = timeline.nodes.items[nodeIndex];
-                    ip_push_change_select_command(node, box_intersect_node_strict(pointerStartPos, pointerPos, node), commands);
+                    ip_push_change_select_command(node, box_intersect_node_strict(pointerStartPos, pointerPos, node), timeline, commands);
                 }
                 perform_new_command_group(`Unique Box Select`, commands, timeline);
             }
@@ -540,7 +551,7 @@ function handle_input(timeline: ITimeline) {
         // Add To Selection while hovering
         let [isOverDeselected, deselectedTarget] = is_pointer_over_deselected(pointerPos, timeline);
         if (isOverDeselected) {
-            perform_new_command_group(`Additive Select ${deselectedTarget.name}`, ip_push_select_command(deselectedTarget, []), timeline);
+            perform_new_command_group(`Additive Select ${deselectedTarget.name}`, ip_push_select_command(deselectedTarget, timeline, []), timeline);
         }
 
         // Exit Add Mode
@@ -577,11 +588,12 @@ function resize_timeline(timeline: ITimeline) {
     window.requestAnimationFrame(render_loop);
 }
 
-function ip_push_change_select_command (node: INode, to: boolean, commands: ICommand[]) : ICommand[] {
+function ip_push_change_select_command (node: INode, to: boolean, timeline: ITimeline, commands: ICommand[]) : ICommand[] {
     if (node.nodeInputState.selected != to) {
         let command : ICommand = {
             type: CommandType.UpdateSelection,
-            target: node,
+            targetIndex: index_in_unordered_list(node, timeline.nodes),
+            targetList: timeline.nodes,
             to: to
         };
         commands.push(command);
@@ -589,18 +601,18 @@ function ip_push_change_select_command (node: INode, to: boolean, commands: ICom
     return commands;
 }
 
-function ip_push_select_command (node: INode, commands: ICommand[]) : ICommand[] {
-    return ip_push_change_select_command(node, true, commands);
+function ip_push_select_command (node: INode, timeline: ITimeline, commands: ICommand[]) : ICommand[] {
+    return ip_push_change_select_command(node, true, timeline, commands);
 }
 
-function ip_push_deselect_command (node: INode, commands: ICommand[]) : ICommand[] {
-    return ip_push_change_select_command(node, false, commands);
+function ip_push_deselect_command (node: INode, timeline: ITimeline, commands: ICommand[]) : ICommand[] {
+    return ip_push_change_select_command(node, false, timeline, commands);
 }
 
 function ip_push_deselect_all_commands (timeline: ITimeline, commands: ICommand[]) : ICommand[] {
     for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
         let node = timeline.nodes.items[nodeIndex];
-        ip_push_deselect_command(node, commands);
+        ip_push_deselect_command(node, timeline, commands);
     }
     return commands;
 }
@@ -609,15 +621,15 @@ function ip_push_select_uniquely_commands(node: INode, timeline: ITimeline, comm
     for (let nIndex = 0; nIndex < timeline.nodes.length; nIndex++) {
         let n = timeline.nodes.items[nIndex];
         if (n === node) {
-            ip_push_select_command(node, commands);
+            ip_push_select_command(node, timeline, commands);
         } else {
-            ip_push_deselect_command(n, commands);
+            ip_push_deselect_command(n, timeline, commands);
         }
     }
     return commands;
 }
 
-function ip_push_move_commands (pointerStartPos : IVector2, pointerEndPos : IVector2, node: INode, commands: ICommand[]) : ICommand[] {
+function ip_push_move_commands (pointerStartPos : IVector2, pointerEndPos : IVector2, node: INode, timeline: ITimeline, commands: ICommand[]) : ICommand[] {
     let sourceRange = make_vector2(node.range[0], node.range[1]);
     let destRange = make_vector2(node.range[0] + pointerEndPos[0] - pointerStartPos[0],
                                     node.range[1] + pointerEndPos[0] - pointerStartPos[0]);
@@ -627,7 +639,8 @@ function ip_push_move_commands (pointerStartPos : IVector2, pointerEndPos : IVec
 
     let rangeCommand : ICommand = {
         type: CommandType.Update,
-        target: node,
+        targetIndex: index_in_unordered_list(node, timeline.nodes),
+        targetList: timeline.nodes,
         field: 'range',
         fieldType: FieldType.IVector2,
         from: sourceRange,
@@ -638,7 +651,8 @@ function ip_push_move_commands (pointerStartPos : IVector2, pointerEndPos : IVec
     if (sourceLayer != destLayer) {
         let layerCommand : ICommand = {
             type: CommandType.Update,
-            target: node,
+            targetIndex: index_in_unordered_list(node, timeline.nodes),
+            targetList: timeline.nodes,
             field: 'layer',
             fieldType: FieldType.Number,
             from: sourceLayer,
@@ -653,7 +667,7 @@ function ip_push_move_selection_commands (pointerStartPos : IVector2, pointerEnd
     for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
         let node = timeline.nodes.items[nodeIndex];
         if (node.nodeInputState.selected) {
-            ip_push_move_commands(pointerStartPos, pointerEndPos, node, commands);
+            ip_push_move_commands(pointerStartPos, pointerEndPos, node, timeline, commands);
         }
     }
     return commands;
@@ -667,7 +681,23 @@ function ip_push_clone_command (node: INode, timeline: ITimeline, commands: ICom
         targetList: timeline.nodes,
         name: node.name,
         layer: node.layer,
-        range: make_vector2(node.range[0], node.range[1])
+        range: make_vector2(node.range[0], node.range[1]),
+        selected: node.nodeInputState.selected
+    };
+    commands.push(command);
+    return commands;
+}
+
+function ip_push_delete_command (node: INode, timeline: ITimeline, commands: ICommand[]) : ICommand[] {
+    let command : ICommand = {
+        type: CommandType.ChangeExistence,
+        isCreate: false,
+        index: index_in_unordered_list(node, timeline.nodes),
+        targetList: timeline.nodes,
+        name: node.name,
+        layer: node.layer,
+        range: make_vector2(node.range[0], node.range[1]),
+        selected: node.nodeInputState.selected
     };
     commands.push(command);
     return commands;
@@ -678,6 +708,16 @@ function ip_push_clone_selection_commands (pointerStartPos : IVector2, pointerEn
         let node = timeline.nodes.items[nodeIndex];
         if (node.nodeInputState.selected) {
             ip_push_clone_command(node, timeline, commands);
+        }
+    }
+    return commands;
+}
+
+function ip_push_delete_selection_commands (timeline : ITimeline, commands: ICommand[]) : ICommand[] {
+    for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+        let node = timeline.nodes.items[nodeIndex];
+        if (node.nodeInputState.selected) {
+            ip_push_delete_command(node, timeline, commands);
         }
     }
     return commands;
@@ -726,9 +766,9 @@ function make_timeline(canvas: HTMLCanvasElement): ITimeline {
         realDims: make_vector2(0, 0),
         localDims: make_vector2(0, 0),
         pixelRatio: window.devicePixelRatio,
-        nodes: make_node_list([ make_node(0, 'Hello', 0, 200),
-                                make_node(0, 'Foo', 300, 500),
-                                make_node(1, 'Bar', 200, 600)])
+        nodes: make_node_list([ make_node(0, 'Hello', 0, 200, false),
+                                make_node(0, 'Foo', 300, 500, false),
+                                make_node(1, 'Bar', 200, 600, false)])
     };
 
     resize_timeline(timeline);
