@@ -94,19 +94,25 @@ const enum PerformMode {
 }
 
 function perform_command_group(commandGroup: ICommandGroup, timeline: ITimeline, mode: PerformMode) {
+    // console.log('------------------');
+    // console.log(timeline.undoState.length);
+    // console.log(timeline.undoState.index)
+    // console.log(timeline.undoState.history.reduce((acc, val) => { acc.push(val.name); return acc; }, []));
+    // console.log('>>');
     switch (mode) {
         case PerformMode.Perform:
             console.log(`Perform ${commandGroup.name} [${commandGroup.commands.length}]`);
             for (let command of commandGroup.commands) {
                 perform_command(command, timeline, false);
             }
-            timeline.undoState.history.push(commandGroup);
             timeline.undoState.index++;
+            timeline.undoState.history[timeline.undoState.index] = commandGroup; // GC(JULIAN): Garbage generated here
             timeline.undoState.length = timeline.undoState.index + 1;
             break;
         case PerformMode.Undo:
             console.log(`Undo ${commandGroup.name} [${commandGroup.commands.length}]`);
-            for (let command of commandGroup.commands) {
+            for (let i = commandGroup.commands.length - 1; i >= 0; i--) { // Have to undo commands in reverse
+                let command = commandGroup.commands[i];
                 perform_command(command, timeline, true);
             }
             timeline.undoState.index--;
@@ -119,6 +125,9 @@ function perform_command_group(commandGroup: ICommandGroup, timeline: ITimeline,
             timeline.undoState.index++;
             break;
     }
+    // console.log(timeline.undoState.length);
+    // console.log(timeline.undoState.index)
+    // console.log('------------------');
 }
 
 function update_node_field (node: INode, field: string, type: FieldType, value: any) {
@@ -324,7 +333,6 @@ function handle_input(timeline: ITimeline) {
     if (mode === InputMode.Idle) {
         if (inputState.undoJustRequested) {
             if (timeline.undoState.index >= 0 && timeline.undoState.length > 0) {
-                console.log(`UNDO`);
                 // console.log(JSON.stringify(timeline.undoState));
                 perform_command_group(timeline.undoState.history[timeline.undoState.index], timeline, PerformMode.Undo);
             } else {
@@ -334,14 +342,12 @@ function handle_input(timeline: ITimeline) {
         }
         if (inputState.redoJustRequested) {
             if (timeline.undoState.index + 1 < timeline.undoState.length) {
-                console.log(`REDO`);
                 perform_command_group(timeline.undoState.history[timeline.undoState.index+1], timeline, PerformMode.Redo);
             } else {
                 console.log(`can't REDO`);
             }
             return;
         }
-
 
         // UNHOVER ALL
         for (let node of timeline.nodes) {
@@ -358,14 +364,12 @@ function handle_input(timeline: ITimeline) {
 
         if (!isOverSomething && !inputState.additiveModifier && inputState.pointerDown) {
             // DESELECT ALL
-            console.log(`Deselect All`);
-            deselect_all(timeline);
+            perform_new_command_group(`Deselect All`, ip_push_deselect_all_commands(timeline, []), timeline);
         }
 
         if (isOverSomething && !overTarget.nodeInputState.selected && !inputState.additiveModifier && inputState.pointerDown) {
             // SELECT UNIQUE (overTarget)
-            console.log(`Unique Select ${overTarget.name}`);
-            select_uniquely(overTarget, timeline);
+            perform_new_command_group(`Unique Select ${overTarget.name}`, ip_push_select_uniquely_commands(overTarget, timeline, []), timeline);
         }
     }
 
@@ -381,17 +385,7 @@ function handle_input(timeline: ITimeline) {
         // Remove From Selection while hovering
         let [isOverSelected, selectedTarget] = is_pointer_over_selected(pointerPos, timeline);
         if (isOverSelected) {
-            console.log(`Additive Deselect ${selectedTarget.name}`);
-            let command : ICommand = {
-                type: CommandType.UpdateSelection,
-                target: selectedTarget,
-                to: false
-            };
-            let commandGroup : ICommandGroup = {
-                name: `Additive Deselect ${selectedTarget.name}`,
-                commands: [command]
-            }
-            perform_command_group(commandGroup, timeline, PerformMode.Perform);
+            perform_new_command_group(`Additive Deselect ${selectedTarget.name}`, ip_push_deselect_command(selectedTarget, []), timeline);
         }
 
         // Exit Remove Mode
@@ -415,48 +409,7 @@ function handle_input(timeline: ITimeline) {
     } else if (timeline.inputMode.mode === InputMode.Move) {
         if (!inputState.pointerDown) {
             let pointerStartPos = timeline.inputMode.pointerStartPos;
-
-            let commands : ICommand[] = [];
-            for (let node of timeline.nodes) {
-                if (node.nodeInputState.selected) {
-                    let sourceRange = make_vector2(node.range[0], node.range[1]);
-                    let destRange = make_vector2(node.range[0] + pointerPos[0] - pointerStartPos[0],
-                                                 node.range[1] + pointerPos[0] - pointerStartPos[0]);
-
-                    let sourceLayer = node.layer;
-                    let destLayer = y_to_layer(pointerPos[1] - pointerStartPos[1] + layer_index_to_top(node.layer));
-
-                    let rangeCommand : ICommand = {
-                        type: CommandType.Update,
-                        target: node,
-                        field: 'range',
-                        fieldType: FieldType.IVector2,
-                        from: sourceRange,
-                        to: destRange
-                    };
-                    let layerCommand : ICommand = {
-                        type: CommandType.Update,
-                        target: node,
-                        field: 'layer',
-                        fieldType: FieldType.Number,
-                        from: sourceLayer,
-                        to: destLayer
-                    };
-
-                    commands.push(rangeCommand);
-                    if (sourceLayer != destLayer) {
-                        commands.push(layerCommand);
-                    }
-                }
-            }
-
-            let commandGroup : ICommandGroup = {
-                name: `Move Selected`,
-                commands: commands
-            }
-            perform_command_group(commandGroup, timeline, PerformMode.Perform);
-
-
+            perform_new_command_group(`Move Selected`, ip_push_move_selection_commands(pointerStartPos, pointerPos, timeline, []), timeline);
             timeline.inputMode = { mode: InputMode.Idle };
             return;
         }
@@ -489,38 +442,15 @@ function handle_input(timeline: ITimeline) {
             if (inputState.additiveModifier) {
                 for (let node of timeline.nodes) {
                     if (box_intersect_node_strict(pointerStartPos, pointerPos, node)) {
-                        let command : ICommand = {
-                            type: CommandType.UpdateSelection,
-                            target: node,
-                            to: true
-                        };
-                        commands.push(command);
-                        // node.nodeInputState.selected = true;
+                        ip_push_select_command(node, commands);
                     }
-                    let commandGroup : ICommandGroup = {
-                        name: `Additive Box Select`,
-                        commands: commands
-                    }
-                    perform_command_group(commandGroup, timeline, PerformMode.Perform);
                 }
+                perform_new_command_group(`Additive Box Select`, commands, timeline);
             } else {
                 for (let node of timeline.nodes) {
-                    let desiredSelection = box_intersect_node_strict(pointerStartPos, pointerPos, node);
-                    if (desiredSelection != node.nodeInputState.selected) {
-                        let command : ICommand = {
-                            type: CommandType.UpdateSelection,
-                            target: node,
-                            to: desiredSelection
-                        };
-                        commands.push(command);
-                    }
-                    // node.nodeInputState.selected = box_intersect_node_strict(pointerStartPos, pointerPos, node);
+                    ip_push_change_select_command(node, box_intersect_node_strict(pointerStartPos, pointerPos, node), commands);
                 }
-                let commandGroup : ICommandGroup = {
-                    name: `Unique Box Select`,
-                    commands: commands
-                }
-                perform_command_group(commandGroup, timeline, PerformMode.Perform);
+                perform_new_command_group(`Unique Box Select`, commands, timeline);
             }
             timeline.inputMode = { mode: InputMode.Idle };
             return;
@@ -539,18 +469,7 @@ function handle_input(timeline: ITimeline) {
         // Add To Selection while hovering
         let [isOverDeselected, deselectedTarget] = is_pointer_over_deselected(pointerPos, timeline);
         if (isOverDeselected) {
-            let command : ICommand = {
-                type: CommandType.UpdateSelection,
-                target: deselectedTarget,
-                to: true
-            };
-            let commandGroup : ICommandGroup = {
-                name: `Additive Select ${deselectedTarget.name}`,
-                commands: [command]
-            }
-            perform_command_group(commandGroup, timeline, PerformMode.Perform);
-            // console.log(`Additive Select ${deselectedTarget.name}`);
-            // deselectedTarget.nodeInputState.selected = true;
+            perform_new_command_group(`Additive Select ${deselectedTarget.name}`, ip_push_select_command(deselectedTarget, []), timeline);
         }
 
         // Exit Add Mode
@@ -587,47 +506,88 @@ function resize_timeline(timeline: ITimeline) {
     window.requestAnimationFrame(render_loop);
 }
 
-function deselect_all(timeline: ITimeline) {
-    let commands = [];
-    for (let node of timeline.nodes) {
-        if (node.nodeInputState.selected) {
-            let command : ICommand = {
-                type: CommandType.UpdateSelection,
-                target: node,
-                to: false
-            };
-            commands.push(command);
-        }
-        // node.nodeInputState.selected = false;
+function ip_push_change_select_command (node: INode, to: boolean, commands: ICommand[]) : ICommand[] {
+    if (node.nodeInputState.selected != to) {
+        let command : ICommand = {
+            type: CommandType.UpdateSelection,
+            target: node,
+            to: to
+        };
+        commands.push(command);
     }
-    let commandGroup : ICommandGroup = {
-        name: 'Deselect All Selected',
-        commands: commands
-    }
-    perform_command_group(commandGroup, timeline, PerformMode.Perform);
+    return commands;
 }
 
-function select_uniquely(node: INode, timeline: ITimeline) {
-    let commands = [];
+function ip_push_select_command (node: INode, commands: ICommand[]) : ICommand[] {
+    return ip_push_change_select_command(node, true, commands);
+}
+
+function ip_push_deselect_command (node: INode, commands: ICommand[]) : ICommand[] {
+    return ip_push_change_select_command(node, false, commands);
+}
+
+function ip_push_deselect_all_commands (timeline: ITimeline, commands: ICommand[]) : ICommand[] {
+    for (let node of timeline.nodes) {
+        ip_push_deselect_command(node, commands);
+    }
+    return commands;
+}
+
+function ip_push_select_uniquely_commands(node: INode, timeline: ITimeline, commands: ICommand[]) : ICommand[] {
     for (let n of timeline.nodes) {
-        if (n === node && !node.nodeInputState.selected) {
-            let command : ICommand = {
-                type: CommandType.UpdateSelection,
-                target: n,
-                to: true
-            };
-            commands.push(command);
-        } else if (n.nodeInputState.selected) {
-            let command : ICommand = {
-                type: CommandType.UpdateSelection,
-                target: n,
-                to: false
-            };
-            commands.push(command);
+        if (n === node) {
+            ip_push_select_command(node, commands);
+        } else {
+            ip_push_deselect_command(n, commands);
         }
     }
+    return commands;
+}
+
+function ip_push_move_commands (pointerStartPos : IVector2, pointerEndPos : IVector2, node: INode, commands: ICommand[]) : ICommand[] {
+    let sourceRange = make_vector2(node.range[0], node.range[1]);
+    let destRange = make_vector2(node.range[0] + pointerEndPos[0] - pointerStartPos[0],
+                                    node.range[1] + pointerEndPos[0] - pointerStartPos[0]);
+
+    let sourceLayer = node.layer;
+    let destLayer = y_to_layer(pointerEndPos[1] - pointerStartPos[1] + layer_index_to_top(node.layer));
+
+    let rangeCommand : ICommand = {
+        type: CommandType.Update,
+        target: node,
+        field: 'range',
+        fieldType: FieldType.IVector2,
+        from: sourceRange,
+        to: destRange
+    };
+    commands.push(rangeCommand);
+
+    if (sourceLayer != destLayer) {
+        let layerCommand : ICommand = {
+            type: CommandType.Update,
+            target: node,
+            field: 'layer',
+            fieldType: FieldType.Number,
+            from: sourceLayer,
+            to: destLayer
+        };
+        commands.push(layerCommand);
+    }
+    return commands;
+}
+
+function ip_push_move_selection_commands (pointerStartPos : IVector2, pointerEndPos : IVector2, timeline : ITimeline, commands: ICommand[]) : ICommand[] {
+    for (let node of timeline.nodes) {
+        if (node.nodeInputState.selected) {
+            ip_push_move_commands(pointerStartPos, pointerEndPos, node, commands);
+        }
+    }
+    return commands;
+}
+
+function perform_new_command_group (name : string, commands: ICommand[], timeline: ITimeline) {
     let commandGroup : ICommandGroup = {
-        name: `Select ${node.name} uniquely`,
+        name: name,
         commands: commands
     }
     perform_command_group(commandGroup, timeline, PerformMode.Perform);
