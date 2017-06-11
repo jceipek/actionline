@@ -13,11 +13,14 @@ const COLORS = {
         background: '#5a5a5a',
         hover: '#7cd4f8',
         selected: '#a7e040',
+        cloned: '#e6db74',
         foreground: '#ae85fc',
         selected_foreground: '#f92672'
     },
     box_select: '#f92672'
 };
+
+type INodeList = IUnorderedList<INode>;
 
 interface ITimeline {
     canvas: HTMLCanvasElement,
@@ -28,7 +31,7 @@ interface ITimeline {
     realDims: IVector2,
     localDims: IVector2,
     pixelRatio: number,
-    nodes: INode[]
+    nodes: INodeList
 }
 
 interface INode {
@@ -38,9 +41,73 @@ interface INode {
     nodeInputState: any // TODO(JULIAN)
 }
 
+interface IUnorderedList<T> {
+    items: T[],
+    length: number
+}
+
+interface IInputState {
+    pointerPos: IVector2
+    pointerDown: boolean
+    pointerJustMoved: boolean
+    undoJustRequested: boolean
+    redoJustRequested: boolean
+    additiveModifier: boolean
+    duplicateModifier: boolean
+    createModifier: boolean
+    deleteModifier: boolean
+    endpointsModifier: boolean
+}
+
+const enum InputMode {
+    Idle,
+    Remove,
+    Move,
+    BoxSelect,
+    Add,
+    EndpointAdjust,
+    Duplicate,
+    Create
+}
+
+type IInputMode = { mode: InputMode.Idle } |
+                  { mode: InputMode.Remove } | 
+                  { mode: InputMode.Move, pointerStartPos: IVector2 } |
+                  { mode: InputMode.BoxSelect, pointerStartPos: IVector2 } |
+                  { mode: InputMode.Add } |
+                  { mode: InputMode.EndpointAdjust, pointerStartPos: IVector2 } |
+                  { mode: InputMode.Duplicate, pointerStartPos: IVector2 } |
+                  { mode: InputMode.Create, pointerStartPos: IVector2 };
+
+function make_node_list (nodes: INode[]) : INodeList {
+    return {
+        items: nodes,
+        length: nodes.length
+    };
+}
+
+function add_to_unordered_list<T> (x: T, index: number, list : IUnorderedList<T>) {
+    list.items[list.length] = list.items[index];
+    list.length++;
+    list.items[index] = x;
+}
+
+function remove_from_unordered_list<T> (index: number, list : IUnorderedList<T>) {
+    list.length--;
+    list.items[index] = list.items[list.length];
+}
+
+function index_in_unordered_list<T> (x: T, list : IUnorderedList<T>) : number {
+    for (let i = 0; i < list.length; i++) {
+        if (x === list.items[i]) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 const enum CommandType {
-    Create,
-    Delete,
+    ChangeExistence,
     Update,
     UpdateSelection
 }
@@ -57,31 +124,28 @@ const enum FieldType {
 };
 
 type ICommand = {
-    type: CommandType.UpdateSelection,
-    target: INode,
+    type: CommandType.UpdateSelection
+    target: INode
     to: boolean
 } | {
-    type: CommandType.Update,
-    target: INode,
-    field: string, // TODO(JULIAN): Make this a keyof
-    fieldType: FieldType,
-    from: any,
+    type: CommandType.Update
+    target: INode
+    field: keyof INode
+    fieldType: FieldType
+    from: any
     to: any
 } | {
-    type: CommandType.Create,
-    name: string,
-    range: IVector2,
+    type: CommandType.ChangeExistence
+    isCreate: boolean
+    index: number
+    targetList: INodeList
+
+    name: string
+    range: IVector2
     layer: number
-} | {
-    type: CommandType.Delete,
-    target: INode,
-    name: string,
-    range: IVector2,
-    layer: number
-}
+};
 
 interface IUndoState {
-    //[1,2,3]
     history: ICommandGroup[]
     length: number
     index: number
@@ -92,6 +156,8 @@ const enum PerformMode {
     Undo,
     Redo
 }
+
+
 
 function perform_command_group(commandGroup: ICommandGroup, timeline: ITimeline, mode: PerformMode) {
     // console.log('------------------');
@@ -130,7 +196,7 @@ function perform_command_group(commandGroup: ICommandGroup, timeline: ITimeline,
     // console.log('------------------');
 }
 
-function update_node_field (node: INode, field: string, type: FieldType, value: any) {
+function update_node_field (node: INode, field: keyof INode, type: FieldType, value: any) {
     switch (type) {
         case FieldType.IVector2:
             node[field][0] = value[0];
@@ -158,44 +224,19 @@ function perform_command(command: ICommand, timeline: ITimeline, reverse: boolea
                 update_node_field(command.target, command.field, command.fieldType, command.from);
             }
         } break;
-        default: {
-            console.error(`Cannot yet handle command type ${command.type}`);
+        case CommandType.ChangeExistence: {
+            let isCreate = (command.isCreate != reverse);
+            if (isCreate) {
+                add_to_unordered_list(make_node(command.layer, command.name, command.range[0], command.range[1]), command.index,command.targetList);
+            } else {
+                remove_from_unordered_list(command.index, command.targetList);
+            }
         } break;
+        // default: {
+        //     console.error(`Cannot yet handle command type ${command.type}`);
+        // } break;
     }   
 }
-
-interface IInputState {
-    pointerPos: IVector2
-    pointerDown: boolean
-    pointerJustMoved: boolean
-    undoJustRequested: boolean
-    redoJustRequested: boolean
-    additiveModifier: boolean
-    duplicateModifier: boolean
-    createModifier: boolean
-    deleteModifier: boolean
-    endpointsModifier: boolean
-}
-
-const enum InputMode {
-    Idle,
-    Remove,
-    Move,
-    BoxSelect,
-    Add,
-    EndpointAdjust,
-    Duplicate,
-    Create
-}
-
-type IInputMode = { mode: InputMode.Idle } |
-                  { mode: InputMode.Remove } | 
-                  { mode: InputMode.Move, pointerStartPos: IVector2 } |
-                  { mode: InputMode.BoxSelect, pointerStartPos: IVector2 } |
-                  { mode: InputMode.Add } |
-                  { mode: InputMode.EndpointAdjust, pointerStartPos: IVector2 } |
-                  { mode: InputMode.Duplicate, pointerStartPos: IVector2 } |
-                  { mode: InputMode.Create, pointerStartPos: IVector2 };
 
 function make_vector2(x, y): IVector2 {
     let res = new Float32Array(2);
@@ -262,7 +303,8 @@ function pos_over_node_endpoint(pos: IVector2, node: INode): number {
 }
 
 function is_pointer_over_endpoint(pos: IVector2, timeline: ITimeline): [boolean, INode, number] {
-    for (let node of timeline.nodes) {
+    for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+        let node = timeline.nodes.items[nodeIndex];
         let endpoint = pos_over_node_endpoint(pos, node);
         if (endpoint !== 0) {
             return [true, node, endpoint];
@@ -272,7 +314,8 @@ function is_pointer_over_endpoint(pos: IVector2, timeline: ITimeline): [boolean,
 }
 
 function is_pointer_over_something(pos: IVector2, timeline: ITimeline): [boolean, INode] {
-    for (let node of timeline.nodes) {
+    for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+        let node = timeline.nodes.items[nodeIndex];
         if (is_pos_in_node(pos, node)) {
             return [true, node];
         }
@@ -281,7 +324,8 @@ function is_pointer_over_something(pos: IVector2, timeline: ITimeline): [boolean
 }
 
 function is_pointer_over_nothing(pos: IVector2, timeline: ITimeline): boolean {
-    for (let node of timeline.nodes) {
+    for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+        let node = timeline.nodes.items[nodeIndex];
         if (is_pos_in_node(pos, node)) {
             return false;
         }
@@ -290,7 +334,8 @@ function is_pointer_over_nothing(pos: IVector2, timeline: ITimeline): boolean {
 }
 
 function is_pointer_over_selected(pos: IVector2, timeline: ITimeline): [boolean, INode] {
-    for (let node of timeline.nodes) {
+    for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+        let node = timeline.nodes.items[nodeIndex];
         if (is_pos_in_node(pos, node)) {
             if (node.nodeInputState.selected) {
                 return [true, node];
@@ -301,7 +346,8 @@ function is_pointer_over_selected(pos: IVector2, timeline: ITimeline): [boolean,
 }
 
 function is_pointer_over_deselected(pos: IVector2, timeline: ITimeline): [boolean, INode] {
-    for (let node of timeline.nodes) {
+    for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+        let node = timeline.nodes.items[nodeIndex];
         if (is_pos_in_node(pos, node)) {
             if (!node.nodeInputState.selected) {
                 return [true, node];
@@ -350,7 +396,8 @@ function handle_input(timeline: ITimeline) {
         }
 
         // UNHOVER ALL
-        for (let node of timeline.nodes) {
+        for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+            let node = timeline.nodes.items[nodeIndex];
             node.nodeInputState.hovered = false;
         }
 
@@ -400,7 +447,7 @@ function handle_input(timeline: ITimeline) {
     // Move selection by dragging while over selected
     if (mode === InputMode.Idle) {
         let [isOverSelected, selectedTarget] = is_pointer_over_selected(pointerPos, timeline);
-        if (isOverSelected && inputState.pointerDown && inputState.pointerJustMoved && !inputState.additiveModifier) {
+        if (isOverSelected && inputState.pointerDown && inputState.pointerJustMoved && !inputState.additiveModifier && !inputState.duplicateModifier) {
             timeline.inputMode = {
                 mode: InputMode.Move,
                 pointerStartPos: make_vector2(pointerPos[0], pointerPos[1])
@@ -410,6 +457,26 @@ function handle_input(timeline: ITimeline) {
         if (!inputState.pointerDown) {
             let pointerStartPos = timeline.inputMode.pointerStartPos;
             perform_new_command_group(`Move Selected`, ip_push_move_selection_commands(pointerStartPos, pointerPos, timeline, []), timeline);
+            timeline.inputMode = { mode: InputMode.Idle };
+            return;
+        }
+    }
+
+    // Clone selection by dragging while over selected
+    if (mode === InputMode.Idle) {
+        let [isOverSelected, selectedTarget] = is_pointer_over_selected(pointerPos, timeline);
+        if (isOverSelected && inputState.pointerDown && inputState.pointerJustMoved && !inputState.additiveModifier && inputState.duplicateModifier) {
+            timeline.inputMode = {
+                mode: InputMode.Duplicate,
+                pointerStartPos: make_vector2(pointerPos[0], pointerPos[1])
+            };
+        }
+    } else if (timeline.inputMode.mode === InputMode.Duplicate) {
+        if (!inputState.pointerDown) {
+            let pointerStartPos = timeline.inputMode.pointerStartPos;
+            let commands = ip_push_move_selection_commands(pointerStartPos, pointerPos, timeline,
+                           ip_push_clone_selection_commands(pointerStartPos, pointerPos, timeline, []));
+            perform_new_command_group(`Duplicate Selected`, commands, timeline);
             timeline.inputMode = { mode: InputMode.Idle };
             return;
         }
@@ -427,11 +494,13 @@ function handle_input(timeline: ITimeline) {
         let pointerStartPos = timeline.inputMode.pointerStartPos;
         if (inputState.pointerDown) {
             if (inputState.additiveModifier) {
-                for (let node of timeline.nodes) {
+                for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+                    let node = timeline.nodes.items[nodeIndex];
                     node.nodeInputState.hovered = node.nodeInputState.selected || box_intersect_node_strict(pointerStartPos, pointerPos, node);
                 }
             } else {
-                for (let node of timeline.nodes) {
+                for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+                    let node = timeline.nodes.items[nodeIndex];
                     node.nodeInputState.hovered = box_intersect_node_strict(pointerStartPos, pointerPos, node);
                 }
             }
@@ -440,14 +509,16 @@ function handle_input(timeline: ITimeline) {
         if (!inputState.pointerDown) {
             let commands : ICommand[] = [];
             if (inputState.additiveModifier) {
-                for (let node of timeline.nodes) {
+                for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+                    let node = timeline.nodes.items[nodeIndex];
                     if (box_intersect_node_strict(pointerStartPos, pointerPos, node)) {
                         ip_push_select_command(node, commands);
                     }
                 }
                 perform_new_command_group(`Additive Box Select`, commands, timeline);
             } else {
-                for (let node of timeline.nodes) {
+                for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+                    let node = timeline.nodes.items[nodeIndex];
                     ip_push_change_select_command(node, box_intersect_node_strict(pointerStartPos, pointerPos, node), commands);
                 }
                 perform_new_command_group(`Unique Box Select`, commands, timeline);
@@ -527,14 +598,16 @@ function ip_push_deselect_command (node: INode, commands: ICommand[]) : ICommand
 }
 
 function ip_push_deselect_all_commands (timeline: ITimeline, commands: ICommand[]) : ICommand[] {
-    for (let node of timeline.nodes) {
+    for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+        let node = timeline.nodes.items[nodeIndex];
         ip_push_deselect_command(node, commands);
     }
     return commands;
 }
 
 function ip_push_select_uniquely_commands(node: INode, timeline: ITimeline, commands: ICommand[]) : ICommand[] {
-    for (let n of timeline.nodes) {
+    for (let nIndex = 0; nIndex < timeline.nodes.length; nIndex++) {
+        let n = timeline.nodes.items[nIndex];
         if (n === node) {
             ip_push_select_command(node, commands);
         } else {
@@ -577,9 +650,34 @@ function ip_push_move_commands (pointerStartPos : IVector2, pointerEndPos : IVec
 }
 
 function ip_push_move_selection_commands (pointerStartPos : IVector2, pointerEndPos : IVector2, timeline : ITimeline, commands: ICommand[]) : ICommand[] {
-    for (let node of timeline.nodes) {
+    for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+        let node = timeline.nodes.items[nodeIndex];
         if (node.nodeInputState.selected) {
             ip_push_move_commands(pointerStartPos, pointerEndPos, node, commands);
+        }
+    }
+    return commands;
+}
+
+function ip_push_clone_command (node: INode, timeline: ITimeline, commands: ICommand[]) : ICommand[] {
+    let command : ICommand = {
+        type: CommandType.ChangeExistence,
+        isCreate: true,
+        index: timeline.nodes.length,
+        targetList: timeline.nodes,
+        name: node.name,
+        layer: node.layer,
+        range: make_vector2(node.range[0], node.range[1])
+    };
+    commands.push(command);
+    return commands;
+}
+
+function ip_push_clone_selection_commands (pointerStartPos : IVector2, pointerEndPos : IVector2, timeline : ITimeline, commands: ICommand[]) : ICommand[] {
+    for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+        let node = timeline.nodes.items[nodeIndex];
+        if (node.nodeInputState.selected) {
+            ip_push_clone_command(node, timeline, commands);
         }
     }
     return commands;
@@ -628,9 +726,9 @@ function make_timeline(canvas: HTMLCanvasElement): ITimeline {
         realDims: make_vector2(0, 0),
         localDims: make_vector2(0, 0),
         pixelRatio: window.devicePixelRatio,
-        nodes: [make_node(0, 'Hello', 0, 200),
-        make_node(0, 'Foo', 300, 500),
-        make_node(1, 'Bar', 200, 600)]
+        nodes: make_node_list([ make_node(0, 'Hello', 0, 200),
+                                make_node(0, 'Foo', 300, 500),
+                                make_node(1, 'Bar', 200, 600)])
     };
 
     resize_timeline(timeline);
@@ -734,7 +832,8 @@ function render_loop() {
 
         let inputState = timeline.inputState;
         ctx.fillStyle = COLORS.nodes.background;
-        for (let node of timeline.nodes) {
+        for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+            let node = timeline.nodes.items[nodeIndex];
             if (!node.nodeInputState.selected) {
                 draw_node_background(timeline, node);
             }
@@ -747,7 +846,8 @@ function render_loop() {
             ctx.strokeStyle = COLORS.nodes.selected;
             let pointerStartPos = timeline.inputMode.pointerStartPos;
             let pointerPos = inputState.pointerPos;
-            for (let node of timeline.nodes) {
+            for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+                let node = timeline.nodes.items[nodeIndex];
                 if (node.nodeInputState.selected) {
                     let x = ((pointerPos[0] - pointerStartPos[0]) + node.range[0]);
                     let y = ((pointerPos[1] - pointerStartPos[1]) + layer_index_to_top(node.layer));
@@ -765,7 +865,52 @@ function render_loop() {
             ctx.textBaseline = 'middle';
             ctx.textAlign = 'center';
             ctx.fillStyle = COLORS.nodes.selected_foreground;
-            for (let node of timeline.nodes) {
+            for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+                let node = timeline.nodes.items[nodeIndex];
+                if (node.nodeInputState.selected) {
+                    let x = ((pointerPos[0] - pointerStartPos[0]) + node.range[0]);
+                    let y = ((pointerPos[1] - pointerStartPos[1]) + layer_index_to_top(node.layer));
+                    let width = (node.range[1] - node.range[0]);
+                    let height = get_node_height(node);
+                    let constrainedY = layer_index_to_top(y_to_layer(y));
+                    ctx.fillText(node.name, (x + width / 2) * pixelRatio,
+                        (constrainedY + height / 2 + NODE_HPADDING) * pixelRatio, width * pixelRatio);
+                }
+            }
+        } else if (timeline.inputMode.mode === InputMode.Duplicate) {
+            ctx.fillStyle = COLORS.nodes.cloned;
+            let pointerStartPos = timeline.inputMode.pointerStartPos;
+            let pointerPos = inputState.pointerPos;
+            for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+                let node = timeline.nodes.items[nodeIndex];
+                if (node.nodeInputState.selected) {
+                    let x = ((pointerPos[0] - pointerStartPos[0]) + node.range[0]);
+                    let y = ((pointerPos[1] - pointerStartPos[1]) + layer_index_to_top(node.layer));
+                    let width = (node.range[1] - node.range[0]);
+                    let height = get_node_height(node);
+                    let constrainedY = layer_index_to_top(y_to_layer(y));
+                    ctx.fillRect(x * pixelRatio, (constrainedY + NODE_HPADDING) * pixelRatio, width * pixelRatio, height * pixelRatio);
+                }
+            }
+
+            ctx.fillStyle = COLORS.nodes.selected;
+            for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+                let node = timeline.nodes.items[nodeIndex];
+                if (node.nodeInputState.selected) {
+                    let width = (node.range[1] - node.range[0]);
+                    let height = get_node_height(node);
+                    ctx.fillRect(node.range[0] * pixelRatio, get_node_top(node) * pixelRatio,
+                        width * pixelRatio,
+                        height * pixelRatio);
+                }
+            }
+
+            ctx.font = `${LAYER_HEIGHT * 0.5 * pixelRatio}px Sans-Serif`;
+            ctx.textBaseline = 'middle';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = COLORS.nodes.selected_foreground;
+            for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+                let node = timeline.nodes.items[nodeIndex];
                 if (node.nodeInputState.selected) {
                     let x = ((pointerPos[0] - pointerStartPos[0]) + node.range[0]);
                     let y = ((pointerPos[1] - pointerStartPos[1]) + layer_index_to_top(node.layer));
@@ -778,7 +923,8 @@ function render_loop() {
             }
         } else {
             ctx.fillStyle = COLORS.nodes.selected;
-            for (let node of timeline.nodes) {
+            for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+                let node = timeline.nodes.items[nodeIndex];
                 if (node.nodeInputState.selected) {
                     draw_node_background(timeline, node);
                 }
@@ -789,14 +935,16 @@ function render_loop() {
         ctx.textBaseline = 'middle';
         ctx.textAlign = 'center';
         ctx.fillStyle = COLORS.nodes.foreground;
-        for (let node of timeline.nodes) {
+        for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+            let node = timeline.nodes.items[nodeIndex];
             let width = node.range[1] - node.range[0];
             let height = get_node_height(node);
             ctx.fillText(node.name, (node.range[0] + width / 2) * pixelRatio, (get_node_top(node) + height / 2) * pixelRatio, width * pixelRatio);
         }
 
         ctx.strokeStyle = COLORS.nodes.hover;
-        for (let node of timeline.nodes) {
+        for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+            let node = timeline.nodes.items[nodeIndex];
             if (node.nodeInputState.hovered) {
                 ctx.strokeRect(node.range[0] * pixelRatio,
                     get_node_top(node) * pixelRatio,
