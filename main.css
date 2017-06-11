@@ -1,0 +1,14 @@
+.timeline {
+    width: 90vw;
+    /*height: 20em;*/
+    height: 100vh;
+    margin-left: auto;
+    margin-right: auto;
+    display: block;
+}
+
+body {
+    margin: 0;
+    padding: 0;
+    background-color: #000;
+}
