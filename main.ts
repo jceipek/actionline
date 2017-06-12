@@ -884,8 +884,13 @@ function make_timeline(canvas: HTMLCanvasElement): ITimeline {
     });
 
     canvas.addEventListener('mousemove', (event) => {
-        timeline.inputState.pointerPos[0] = event.clientX - canvas.offsetLeft;
-        timeline.inputState.pointerPos[1] = event.clientY - canvas.offsetTop;
+        timeline.inputState.duplicateModifier = event.altKey;
+        timeline.inputState.endpointsModifier = event.ctrlKey;
+        timeline.inputState.additiveModifier = event.shiftKey;
+        timeline.inputState.createModifier = event.metaKey;
+
+        timeline.inputState.pointerPos[0] = event.pageX - canvas.offsetLeft;
+        timeline.inputState.pointerPos[1] = event.pageY - canvas.offsetTop;
         timeline.inputState.pointerJustMoved = true;
         input_event(timeline);
         event.preventDefault();
@@ -896,6 +901,8 @@ function make_timeline(canvas: HTMLCanvasElement): ITimeline {
     });
 
     document.addEventListener('keydown', (event) => {
+        timeline.inputState.duplicateModifier = event.altKey;
+        timeline.inputState.endpointsModifier = event.ctrlKey;
         timeline.inputState.additiveModifier = event.shiftKey;
         timeline.inputState.createModifier = event.metaKey;
         if (((event.key === 'Backspace') || (event.key === 'Delete'))) {
@@ -911,9 +918,6 @@ function make_timeline(canvas: HTMLCanvasElement): ITimeline {
                 event.preventDefault();
             }
         }
-
-        timeline.inputState.duplicateModifier = event.altKey;
-        timeline.inputState.endpointsModifier = event.ctrlKey;
         input_event(timeline);
     });
 
