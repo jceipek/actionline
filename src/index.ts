@@ -1,3 +1,7 @@
+import maquette = require("maquette");
+type MProjector = maquette.Projector;
+let h = maquette.h;
+
 type IVector2 = Float32Array;
 type ILayer = number; // Integers only!
 
@@ -32,7 +36,9 @@ interface ITimeline {
     realDims: IVector2,
     localDims: IVector2,
     pixelRatio: number,
-    nodes: INodeList
+    nodes: INodeList,
+    inspectors: MProjector[],
+    inspectorFunctions: any // TODO(JULIAN)
 }
 
 interface INode {
@@ -50,6 +56,7 @@ interface IUnorderedList<T> {
 interface IInputState {
     pointerPos: IVector2
     pointerDown: boolean
+    pointerJustDown: boolean
     pointerJustMoved: boolean
     undoJustRequested: boolean
     redoJustRequested: boolean
@@ -302,6 +309,11 @@ function is_pos_in_node(pos: IVector2, node: INode): boolean {
         is_val_in_range(pos[1], layer_index_to_top(node.layer), layer_index_to_bottom(node.layer));
 }
 
+function is_pos_in_timeline(pos: IVector2, timeline: ITimeline): boolean {
+    return is_val_in_range(pos[0], 0, timeline.realDims[0]) &&
+        is_val_in_range(pos[1], 0, timeline.realDims[1]);
+}
+
 function pos_over_node_endpoint(pos: IVector2, node: INode): number {
     if (is_val_in_range(pos[1], layer_index_to_top(node.layer), layer_index_to_bottom(node.layer))) {
         if (is_val_in_range(pos[0], node.range[0], node.range[0] + NODE_ENDPOINT_WIDTH)) {
@@ -386,6 +398,8 @@ function handle_input(timeline: ITimeline) {
     let inputState = timeline.inputState;
     let pointerPos = inputState.pointerPos;
 
+    let isPosInTimeline = is_pos_in_timeline(inputState.pointerPos, timeline);
+
     // Oneshots
     if (mode === InputMode.Idle) {
         if (inputState.undoJustRequested) {
@@ -420,17 +434,17 @@ function handle_input(timeline: ITimeline) {
             // console.log(`Hover ${overTarget.name}`)
         }
 
-        if (!isOverSomething && !inputState.additiveModifier && inputState.pointerDown) {
+        if (!isOverSomething && !inputState.additiveModifier && inputState.pointerJustDown && isPosInTimeline) {
             // DESELECT ALL
             perform_new_command_group(`Deselect All`, ip_push_deselect_all_commands(timeline, []), timeline);
         }
 
-        if (isOverSomething && !overTarget.nodeInputState.selected && !inputState.additiveModifier && inputState.pointerDown) {
+        if (isOverSomething && !overTarget.nodeInputState.selected && !inputState.additiveModifier && inputState.pointerJustDown && isPosInTimeline) {
             // SELECT UNIQUE (overTarget)
             perform_new_command_group(`Unique Select ${overTarget.name}`, ip_push_select_uniquely_commands(overTarget, timeline, []), timeline);
         }
 
-        if (inputState.deleteModifier) {
+        if (inputState.deleteModifier && isPosInTimeline && isPosInTimeline) {
             // SELECT UNIQUE (overTarget)
             perform_new_command_group(`Delete Selection`, ip_push_delete_selection_commands(timeline, []), timeline);
         }
@@ -500,7 +514,7 @@ function handle_input(timeline: ITimeline) {
 
     // Box select by dragging while over nothing
     if (mode === InputMode.Idle) {
-        if (inputState.pointerDown && inputState.pointerJustMoved && is_pointer_over_nothing(pointerPos, timeline) && !inputState.createModifier) {
+        if (inputState.pointerJustDown && is_pointer_over_nothing(pointerPos, timeline) && !inputState.createModifier && isPosInTimeline) {
             timeline.inputMode = {
                 mode: InputMode.BoxSelect,
                 pointerStartPos: make_vector2(pointerPos[0], pointerPos[1])
@@ -546,7 +560,7 @@ function handle_input(timeline: ITimeline) {
 
     // Create by dragging while over nothing and holding createModifier
     if (mode === InputMode.Idle) {
-        if (inputState.pointerDown && inputState.pointerJustMoved && is_pointer_over_nothing(pointerPos, timeline) && inputState.createModifier) {
+        if (inputState.pointerJustDown && inputState.pointerJustMoved && is_pointer_over_nothing(pointerPos, timeline) && inputState.createModifier && isPosInTimeline) {
             timeline.inputMode = {
                 mode: InputMode.Create,
                 newName: 'New',
@@ -615,7 +629,8 @@ function input_event(timeline: ITimeline) {
     timeline.inputState.pointerJustMoved = false;
     timeline.inputState.undoJustRequested = false;
     timeline.inputState.redoJustRequested = false;
-    window.requestAnimationFrame(render_loop);
+    timeline.inputState.pointerJustDown = false;
+    request_rerender(timeline);
 }
 
 function lin_map(inputStart: number, inputEnd: number, outputStart: number, outputEnd: number, inputValue: number): number {
@@ -630,7 +645,7 @@ function resize_timeline(timeline: ITimeline) {
     canvas.height = canvas.clientHeight * 2;
     set_vector2(timeline.realDims, canvas.clientWidth, canvas.clientHeight);
     set_vector2(timeline.localDims, canvas.width, canvas.height);
-    window.requestAnimationFrame(render_loop);
+    request_rerender(timeline);
 }
 
 function ip_push_change_select_command_with_index (nodeIndex: number, targetList: INodeList, to: boolean, commands: ICommand[]) : ICommand[] {
@@ -671,6 +686,117 @@ function ip_push_select_uniquely_commands(node: INode, timeline: ITimeline, comm
     return commands;
 }
 
+function ip_push_change_layer_command_with_index (sourceLayer: number, destLayer: number, nodeIndex: number, targetList: INodeList, commands: ICommand[]) : ICommand[] {
+    if (sourceLayer != destLayer) {
+        let layerCommand : ICommand = {
+            type: CommandType.Update,
+            targetIndex: nodeIndex,
+            targetList: targetList,
+            field: 'layer',
+            fieldType: FieldType.Number,
+            from: sourceLayer,
+            to: destLayer
+        };
+        commands.push(layerCommand);
+    }
+    return commands;
+}
+
+function ip_push_change_duration_command_with_index (sourceDuration: number, nodeIndex: number, targetList: INodeList, commands: ICommand[]) : ICommand[] {
+    let node = targetList.items[nodeIndex];
+    let sourceRange = make_vector2(node.range[0], node.range[1]);
+    let leftX = node.range[0];
+    let rightX = node.range[0] + sourceDuration;
+    let destRange = make_vector2(Math.min(leftX, rightX), Math.max(leftX, rightX));
+
+    let rangeCommand : ICommand = {
+        type: CommandType.Update,
+        targetIndex: nodeIndex,
+        targetList: targetList,
+        field: 'range',
+        fieldType: FieldType.IVector2,
+        from: sourceRange,
+        to: destRange
+    };
+    commands.push(rangeCommand);
+    return commands;
+}
+
+function ip_push_change_range_index_command_with_index (rangeIndex: 0|1, destValue: number, nodeIndex: number, targetList: INodeList, commands: ICommand[]) : ICommand[] {
+    let node = targetList.items[nodeIndex];
+    let sourceRange = make_vector2(node.range[0], node.range[1]);
+    let destRange = make_vector2(sourceRange[0], sourceRange[1]);
+    destRange[rangeIndex] = destValue;
+
+    let rangeCommand : ICommand = {
+        type: CommandType.Update,
+        targetIndex: nodeIndex,
+        targetList: targetList,
+        field: 'range',
+        fieldType: FieldType.IVector2,
+        from: sourceRange,
+        to: destRange
+    };
+    commands.push(rangeCommand);
+    return commands;
+}
+
+function ip_push_change_name_command_with_index (sourceName: string, destName: string, nodeIndex: number, targetList: INodeList, commands: ICommand[]) : ICommand[] {
+    if (sourceName != destName) {
+        let nameCommand : ICommand = {
+            type: CommandType.Update,
+            targetIndex: nodeIndex,
+            targetList: targetList,
+            field: 'name',
+            fieldType: FieldType.String,
+            from: sourceName,
+            to: destName
+        };
+        commands.push(nameCommand);
+    }
+    return commands;
+}
+
+function ip_push_change_selection_name_commands (destName: string, timeline : ITimeline, commands: ICommand[]) : ICommand[] {
+    for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+        let node = timeline.nodes.items[nodeIndex];
+        if (node.nodeInputState.selected) {
+            ip_push_change_name_command_with_index(node.name, destName, nodeIndex, timeline.nodes, commands);
+        }
+    }
+    return commands;
+}
+
+function ip_push_change_selection_layer_commands (destLayer: number, timeline : ITimeline, commands: ICommand[]) : ICommand[] {
+    for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+        let node = timeline.nodes.items[nodeIndex];
+        if (node.nodeInputState.selected) {
+            ip_push_change_layer_command_with_index(node.layer, destLayer, nodeIndex, timeline.nodes, commands);
+        }
+    }
+    return commands;
+}
+
+function ip_push_change_selection_duration_commands (destDuration: number, timeline : ITimeline, commands: ICommand[]) : ICommand[] {
+    for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+        let node = timeline.nodes.items[nodeIndex];
+        if (node.nodeInputState.selected) {
+            ip_push_change_duration_command_with_index(destDuration, nodeIndex, timeline.nodes, commands);
+        }
+    }
+    return commands;
+}
+
+function ip_push_change_selection_range_index_commands (rangeIndex: 0|1, destValue: number, timeline : ITimeline, commands: ICommand[]) : ICommand[] {
+    for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+        let node = timeline.nodes.items[nodeIndex];
+        if (node.nodeInputState.selected) {
+            ip_push_change_range_index_command_with_index(rangeIndex, destValue, nodeIndex, timeline.nodes, commands);
+        }
+    }
+    return commands;
+}
+
 function ip_push_move_commands_with_index (pointerStartPos : IVector2, pointerEndPos : IVector2, nodeIndex: number, targetList: INodeList, commands: ICommand[]) : ICommand[] {
     let node = targetList.items[nodeIndex];
     let sourceRange = make_vector2(node.range[0], node.range[1]);
@@ -691,18 +817,7 @@ function ip_push_move_commands_with_index (pointerStartPos : IVector2, pointerEn
     };
     commands.push(rangeCommand);
 
-    if (sourceLayer != destLayer) {
-        let layerCommand : ICommand = {
-            type: CommandType.Update,
-            targetIndex: nodeIndex,
-            targetList: targetList,
-            field: 'layer',
-            fieldType: FieldType.Number,
-            from: sourceLayer,
-            to: destLayer
-        };
-        commands.push(layerCommand);
-    }
+    ip_push_change_layer_command_with_index(sourceLayer, destLayer, nodeIndex, targetList, commands)
     return commands;
 }
 
@@ -835,6 +950,12 @@ function y_to_layer(y: number) {
     return Math.floor(y / LAYER_HEIGHT);
 }
 
+function attach_inspector_to_timeline (inspectorElem: Element, timeline: ITimeline) {
+    let inspector = maquette.createProjector();
+    inspector.append(inspectorElem, () => { return render_inspector(timeline); });
+    timeline.inspectors.push(inspector);
+}
+
 function make_timeline(canvas: HTMLCanvasElement): ITimeline {
     let ctx = canvas.getContext('2d');
 
@@ -848,6 +969,7 @@ function make_timeline(canvas: HTMLCanvasElement): ITimeline {
         inputState: {
             pointerPos: make_vector2(0, 0),
             pointerDown: false,
+            pointerJustDown: false,
             pointerJustMoved: false,
             additiveModifier: false,
             duplicateModifier: false,
@@ -862,28 +984,41 @@ function make_timeline(canvas: HTMLCanvasElement): ITimeline {
         realDims: make_vector2(0, 0),
         localDims: make_vector2(0, 0),
         pixelRatio: window.devicePixelRatio,
-        nodes: make_node_list([ make_node(0, 'Hello', 0, 200, false),
+        nodes: make_node_list([ make_node(0, 'Hello', 0, 200, true),
                                 make_node(0, 'Foo', 300, 500, false),
-                                make_node(1, 'Bar', 200, 600, false)])
+                                make_node(1, 'Bar', 200, 600, false)]),
+        inspectors: [],
+        inspectorFunctions: {}
     };
+
+    timeline.inspectorFunctions.edit_layer = edit_layer_function(timeline);
+    timeline.inspectorFunctions.edit_duration = edit_duration_function(timeline);
+    timeline.inspectorFunctions.edit_start = edit_start_function(timeline);
+    timeline.inspectorFunctions.edit_end = edit_end_function(timeline);
+    timeline.inspectorFunctions.edit_name = edit_name_function(timeline);
 
     resize_timeline(timeline);
 
     let inputState = timeline.inputState;
 
-    canvas.addEventListener('mousedown', (event) => {
+    window.addEventListener('mousedown', (event) => {
         inputState.pointerDown = true;
+        inputState.pointerJustDown = true;
         input_event(timeline);
-        event.preventDefault();
+        if (is_pos_in_timeline(inputState.pointerPos, timeline)) {
+            event.preventDefault();
+        }
     });
 
-    canvas.addEventListener('mouseup', (event) => {
+    window.addEventListener('mouseup', (event) => {
         inputState.pointerDown = false;
         input_event(timeline);
-        event.preventDefault();
+        if (is_pos_in_timeline(inputState.pointerPos, timeline)) {
+            event.preventDefault();
+        }
     });
 
-    canvas.addEventListener('mousemove', (event) => {
+    window.addEventListener('mousemove', (event) => {
         timeline.inputState.duplicateModifier = event.altKey;
         timeline.inputState.endpointsModifier = event.ctrlKey;
         timeline.inputState.additiveModifier = event.shiftKey;
@@ -893,11 +1028,15 @@ function make_timeline(canvas: HTMLCanvasElement): ITimeline {
         timeline.inputState.pointerPos[1] = event.pageY - canvas.offsetTop;
         timeline.inputState.pointerJustMoved = true;
         input_event(timeline);
-        event.preventDefault();
+        if (is_pos_in_timeline(inputState.pointerPos, timeline)) {
+            event.preventDefault();
+        }
     });
 
     canvas.addEventListener('contextmenu', (event) => {
-        event.preventDefault();
+        if (is_pos_in_timeline(inputState.pointerPos, timeline)) {
+            event.preventDefault();
+        }
     });
 
     document.addEventListener('keydown', (event) => {
@@ -935,19 +1074,6 @@ function make_timeline(canvas: HTMLCanvasElement): ITimeline {
     return timeline;
 }
 
-let timelineElems: HTMLCollectionOf<Element> = document.getElementsByClassName('js-timeline');
-let timelines: ITimeline[] = [];
-for (let i = 0; i < timelineElems.length; i++) {
-    let timelineElem = timelineElems[i];
-    let timeline = make_timeline(<HTMLCanvasElement>timelineElem);
-    timelines.push(timeline);
-}
-
-window.addEventListener('resize', () => {
-    for (let timeline of timelines) {
-        resize_timeline(timeline);
-    }
-});
 
 
 
@@ -1003,223 +1129,369 @@ function render_endpoints (ctx: CanvasRenderingContext2D, x: number, y: number, 
     ctx.fill();
 }
 
-function render_loop() {
-    for (let timeline of timelines) {
-        let ctx = timeline.context;
-        let canvas = timeline.canvas;
-        let pixelRatio = timeline.pixelRatio;
+function render_loop(timeline : ITimeline) {
+    let ctx = timeline.context;
+    let canvas = timeline.canvas;
+    let pixelRatio = timeline.pixelRatio;
 
-        ctx.fillStyle = COLORS.background;
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = COLORS.background;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        ctx.lineWidth = timeline.pixelRatio;
+    ctx.lineWidth = timeline.pixelRatio;
 
-        ctx.fillStyle = COLORS.layer.background;
-        for (let layerIndex = 0; layerIndex < y_to_layer(timeline.localDims[1]); layerIndex++) {
-            ctx.fillRect(0, (layer_index_to_top(layerIndex) + NODE_HPADDING) * pixelRatio,
-                canvas.width, (LAYER_HEIGHT - NODE_HPADDING * 2) * pixelRatio);
+    ctx.fillStyle = COLORS.layer.background;
+    for (let layerIndex = 0; layerIndex < y_to_layer(timeline.localDims[1]); layerIndex++) {
+        ctx.fillRect(0, (layer_index_to_top(layerIndex) + NODE_HPADDING) * pixelRatio,
+            canvas.width, (LAYER_HEIGHT - NODE_HPADDING * 2) * pixelRatio);
+    }
+
+    let inputState = timeline.inputState;
+    ctx.fillStyle = COLORS.nodes.background;
+    for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+        let node = timeline.nodes.items[nodeIndex];
+        if (!node.nodeInputState.selected) {
+            draw_node_background(timeline, node);
         }
+    }
 
-        let inputState = timeline.inputState;
-        ctx.fillStyle = COLORS.nodes.background;
+    if (timeline.inputMode.mode === InputMode.Move) {
+        ctx.fillStyle = COLORS.nodes.selected;
+        ctx.strokeStyle = COLORS.nodes.selected;
+        let pointerStartPos = timeline.inputMode.pointerStartPos;
+        let pointerPos = inputState.pointerPos;
         for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
             let node = timeline.nodes.items[nodeIndex];
-            if (!node.nodeInputState.selected) {
-                draw_node_background(timeline, node);
-            }
-        }
-
-        if (timeline.inputMode.mode === InputMode.Move) {
-            ctx.fillStyle = COLORS.nodes.selected;
-            ctx.strokeStyle = COLORS.nodes.selected;
-            let pointerStartPos = timeline.inputMode.pointerStartPos;
-            let pointerPos = inputState.pointerPos;
-            for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
-                let node = timeline.nodes.items[nodeIndex];
-                if (node.nodeInputState.selected) {
-                    let x = ((pointerPos[0] - pointerStartPos[0]) + node.range[0]);
-                    let y = ((pointerPos[1] - pointerStartPos[1]) + layer_index_to_top(node.layer));
-                    let width = (node.range[1] - node.range[0]);
-                    let height = get_node_height(node);
-                    let constrainedY = layer_index_to_top(y_to_layer(y));
-                    ctx.fillRect(x * pixelRatio, (constrainedY + NODE_HPADDING) * pixelRatio, width * pixelRatio, height * pixelRatio);
-                    ctx.strokeRect(node.range[0] * pixelRatio, get_node_top(node) * pixelRatio,
-                        width * pixelRatio,
-                        height * pixelRatio);
-                }
-            }
-
-            ctx.font = `${LAYER_HEIGHT * 0.5 * pixelRatio}px Sans-Serif`;
-            ctx.textBaseline = 'middle';
-            ctx.textAlign = 'center';
-            ctx.fillStyle = COLORS.nodes.selected_foreground;
-            for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
-                let node = timeline.nodes.items[nodeIndex];
-                if (node.nodeInputState.selected) {
-                    let x = ((pointerPos[0] - pointerStartPos[0]) + node.range[0]);
-                    let y = ((pointerPos[1] - pointerStartPos[1]) + layer_index_to_top(node.layer));
-                    let width = (node.range[1] - node.range[0]);
-                    let height = get_node_height(node);
-                    let constrainedY = layer_index_to_top(y_to_layer(y));
-                    ctx.fillText(node.name, (x + width / 2) * pixelRatio,
-                        (constrainedY + height / 2 + NODE_HPADDING) * pixelRatio, width * pixelRatio);
-                }
-            }
-        } else if (timeline.inputMode.mode === InputMode.Duplicate) {
-            ctx.fillStyle = COLORS.nodes.cloned;
-            let pointerStartPos = timeline.inputMode.pointerStartPos;
-            let pointerPos = inputState.pointerPos;
-            for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
-                let node = timeline.nodes.items[nodeIndex];
-                if (node.nodeInputState.selected) {
-                    let x = ((pointerPos[0] - pointerStartPos[0]) + node.range[0]);
-                    let y = ((pointerPos[1] - pointerStartPos[1]) + layer_index_to_top(node.layer));
-                    let width = (node.range[1] - node.range[0]);
-                    let height = get_node_height(node);
-                    let constrainedY = layer_index_to_top(y_to_layer(y));
-                    ctx.fillRect(x * pixelRatio, (constrainedY + NODE_HPADDING) * pixelRatio, width * pixelRatio, height * pixelRatio);
-                }
-            }
-
-            ctx.fillStyle = COLORS.nodes.selected;
-            for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
-                let node = timeline.nodes.items[nodeIndex];
-                if (node.nodeInputState.selected) {
-                    let width = (node.range[1] - node.range[0]);
-                    let height = get_node_height(node);
-                    ctx.fillRect(node.range[0] * pixelRatio, get_node_top(node) * pixelRatio,
-                        width * pixelRatio,
-                        height * pixelRatio);
-                }
-            }
-
-            ctx.font = `${LAYER_HEIGHT * 0.5 * pixelRatio}px Sans-Serif`;
-            ctx.textBaseline = 'middle';
-            ctx.textAlign = 'center';
-            ctx.fillStyle = COLORS.nodes.selected_foreground;
-            for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
-                let node = timeline.nodes.items[nodeIndex];
-                if (node.nodeInputState.selected) {
-                    let x = ((pointerPos[0] - pointerStartPos[0]) + node.range[0]);
-                    let y = ((pointerPos[1] - pointerStartPos[1]) + layer_index_to_top(node.layer));
-                    let width = (node.range[1] - node.range[0]);
-                    let height = get_node_height(node);
-                    let constrainedY = layer_index_to_top(y_to_layer(y));
-                    ctx.fillText(node.name, (x + width / 2) * pixelRatio,
-                        (constrainedY + height / 2 + NODE_HPADDING) * pixelRatio, width * pixelRatio);
-                }
-            }
-        } else if (timeline.inputMode.mode === InputMode.EndpointAdjust) {
-            ctx.fillStyle = COLORS.nodes.cloned;
-            let pointerStartPos = timeline.inputMode.pointerStartPos;
-            let endpointIndex = timeline.inputMode.endpointIndex;
-            let pointerPos = inputState.pointerPos;
-            for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
-                let node = timeline.nodes.items[nodeIndex];
-                if (node.nodeInputState.selected) {
-                    let pointerDiff = (pointerPos[0] - pointerStartPos[0]);
-                    let leftX = node.range[0] + (endpointIndex === 0? pointerDiff : 0);
-                    let rightX = node.range[1] + (endpointIndex === 1? pointerDiff : 0);
-                    let x = Math.min(leftX, rightX);
-                    let width = Math.abs(rightX - leftX);
-                    let height = get_node_height(node);
-                    ctx.fillRect(x * pixelRatio, get_node_top(node) * pixelRatio, width * pixelRatio, height * pixelRatio);
-                }
-            }
-
-            ctx.fillStyle = COLORS.nodes.selected;
-            for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
-                let node = timeline.nodes.items[nodeIndex];
-                if (node.nodeInputState.selected) {
-                    let width = (node.range[1] - node.range[0]);
-                    let height = get_node_height(node);
-                    ctx.strokeRect(node.range[0] * pixelRatio, get_node_top(node) * pixelRatio,
-                        width * pixelRatio,
-                        height * pixelRatio);
-                }
-            }
-
-            ctx.fillStyle = COLORS.nodes.endpoints;
-            render_adjusted_endpoints(ctx, timeline, pixelRatio, pointerStartPos, pointerPos, endpointIndex);
-
-            ctx.font = `${LAYER_HEIGHT * 0.5 * pixelRatio}px Sans-Serif`;
-            ctx.textBaseline = 'middle';
-            ctx.textAlign = 'center';
-            ctx.fillStyle = COLORS.nodes.selected_foreground;
-            for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
-                let node = timeline.nodes.items[nodeIndex];
-                if (node.nodeInputState.selected) {
-                    let pointerDiff = (pointerPos[0] - pointerStartPos[0]);
-                    let leftX = node.range[0] + (endpointIndex === 0? pointerDiff : 0);
-                    let rightX = node.range[1] + (endpointIndex === 1? pointerDiff : 0);
-                    let x = Math.min(leftX, rightX);
-                    let width = Math.abs(rightX - leftX);
-                    let height = get_node_height(node);
-                    ctx.fillText(node.name, (x + width / 2) * pixelRatio,
-                        (get_node_top(node) + height / 2) * pixelRatio, width * pixelRatio);
-                }
-            }
-        } else if (timeline.inputMode.mode === InputMode.Create) {
-            ctx.fillStyle = COLORS.nodes.cloned;
-            let pointerStartPos = timeline.inputMode.pointerStartPos;
-            let pointerPos = inputState.pointerPos;
-            
-            let layer = y_to_layer(pointerStartPos[1]);
-            let leftX = Math.min(pointerStartPos[0], pointerPos[0]);
-            let rightX = Math.max(pointerStartPos[0], pointerPos[0]);
-
-            ctx.fillRect(leftX * pixelRatio, (layer_index_to_top(layer) + NODE_HPADDING) * pixelRatio, (rightX - leftX) * pixelRatio, get_node_height_for_layer(layer) * pixelRatio);
-
-        } else {
-            ctx.fillStyle = COLORS.nodes.selected;
-            for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
-                let node = timeline.nodes.items[nodeIndex];
-                if (node.nodeInputState.selected) {
-                    draw_node_background(timeline, node);
-                }
-            }
-
-            if (timeline.inputState.endpointsModifier) {
-                ctx.fillStyle = COLORS.nodes.endpoints;
-                render_standard_endpoints(ctx, timeline, pixelRatio);
+            if (node.nodeInputState.selected) {
+                let x = ((pointerPos[0] - pointerStartPos[0]) + node.range[0]);
+                let y = ((pointerPos[1] - pointerStartPos[1]) + layer_index_to_top(node.layer));
+                let width = (node.range[1] - node.range[0]);
+                let height = get_node_height(node);
+                let constrainedY = layer_index_to_top(y_to_layer(y));
+                ctx.fillRect(x * pixelRatio, (constrainedY + NODE_HPADDING) * pixelRatio, width * pixelRatio, height * pixelRatio);
+                ctx.strokeRect(node.range[0] * pixelRatio, get_node_top(node) * pixelRatio,
+                    width * pixelRatio,
+                    height * pixelRatio);
             }
         }
 
         ctx.font = `${LAYER_HEIGHT * 0.5 * pixelRatio}px Sans-Serif`;
         ctx.textBaseline = 'middle';
         ctx.textAlign = 'center';
-        ctx.fillStyle = COLORS.nodes.foreground;
+        ctx.fillStyle = COLORS.nodes.selected_foreground;
         for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
             let node = timeline.nodes.items[nodeIndex];
-            let width = node.range[1] - node.range[0];
-            let height = get_node_height(node);
-            ctx.fillText(node.name, (node.range[0] + width / 2) * pixelRatio, (get_node_top(node) + height / 2) * pixelRatio, width * pixelRatio);
+            if (node.nodeInputState.selected) {
+                let x = ((pointerPos[0] - pointerStartPos[0]) + node.range[0]);
+                let y = ((pointerPos[1] - pointerStartPos[1]) + layer_index_to_top(node.layer));
+                let width = (node.range[1] - node.range[0]);
+                let height = get_node_height(node);
+                let constrainedY = layer_index_to_top(y_to_layer(y));
+                ctx.fillText(node.name, (x + width / 2) * pixelRatio,
+                    (constrainedY + height / 2 + NODE_HPADDING) * pixelRatio, width * pixelRatio);
+            }
         }
-
-        ctx.strokeStyle = COLORS.nodes.hover;
+    } else if (timeline.inputMode.mode === InputMode.Duplicate) {
+        ctx.fillStyle = COLORS.nodes.cloned;
+        let pointerStartPos = timeline.inputMode.pointerStartPos;
+        let pointerPos = inputState.pointerPos;
         for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
             let node = timeline.nodes.items[nodeIndex];
-            if (node.nodeInputState.hovered) {
-                ctx.strokeRect(node.range[0] * pixelRatio,
-                    get_node_top(node) * pixelRatio,
-                    (node.range[1] - node.range[0]) * pixelRatio,
-                    get_node_height(node) * pixelRatio);
+            if (node.nodeInputState.selected) {
+                let x = ((pointerPos[0] - pointerStartPos[0]) + node.range[0]);
+                let y = ((pointerPos[1] - pointerStartPos[1]) + layer_index_to_top(node.layer));
+                let width = (node.range[1] - node.range[0]);
+                let height = get_node_height(node);
+                let constrainedY = layer_index_to_top(y_to_layer(y));
+                ctx.fillRect(x * pixelRatio, (constrainedY + NODE_HPADDING) * pixelRatio, width * pixelRatio, height * pixelRatio);
             }
         }
 
-
-        if (timeline.inputMode.mode === InputMode.BoxSelect) {
-            ctx.strokeStyle = COLORS.box_select;
-            let pointerStartPos = timeline.inputMode.pointerStartPos;
-            let width = Math.abs(inputState.pointerPos[0] - pointerStartPos[0]);
-            let height = Math.abs(inputState.pointerPos[1] - pointerStartPos[1]);
-            ctx.strokeRect(Math.min(pointerStartPos[0], inputState.pointerPos[0]) * pixelRatio,
-                Math.min(pointerStartPos[1], inputState.pointerPos[1]) * pixelRatio,
-                width * pixelRatio,
-                height * pixelRatio);
+        ctx.fillStyle = COLORS.nodes.selected;
+        for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+            let node = timeline.nodes.items[nodeIndex];
+            if (node.nodeInputState.selected) {
+                let width = (node.range[1] - node.range[0]);
+                let height = get_node_height(node);
+                ctx.fillRect(node.range[0] * pixelRatio, get_node_top(node) * pixelRatio,
+                    width * pixelRatio,
+                    height * pixelRatio);
+            }
         }
 
+        ctx.font = `${LAYER_HEIGHT * 0.5 * pixelRatio}px Sans-Serif`;
+        ctx.textBaseline = 'middle';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = COLORS.nodes.selected_foreground;
+        for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+            let node = timeline.nodes.items[nodeIndex];
+            if (node.nodeInputState.selected) {
+                let x = ((pointerPos[0] - pointerStartPos[0]) + node.range[0]);
+                let y = ((pointerPos[1] - pointerStartPos[1]) + layer_index_to_top(node.layer));
+                let width = (node.range[1] - node.range[0]);
+                let height = get_node_height(node);
+                let constrainedY = layer_index_to_top(y_to_layer(y));
+                ctx.fillText(node.name, (x + width / 2) * pixelRatio,
+                    (constrainedY + height / 2 + NODE_HPADDING) * pixelRatio, width * pixelRatio);
+            }
+        }
+    } else if (timeline.inputMode.mode === InputMode.EndpointAdjust) {
+        ctx.fillStyle = COLORS.nodes.cloned;
+        let pointerStartPos = timeline.inputMode.pointerStartPos;
+        let endpointIndex = timeline.inputMode.endpointIndex;
+        let pointerPos = inputState.pointerPos;
+        for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+            let node = timeline.nodes.items[nodeIndex];
+            if (node.nodeInputState.selected) {
+                let pointerDiff = (pointerPos[0] - pointerStartPos[0]);
+                let leftX = node.range[0] + (endpointIndex === 0? pointerDiff : 0);
+                let rightX = node.range[1] + (endpointIndex === 1? pointerDiff : 0);
+                let x = Math.min(leftX, rightX);
+                let width = Math.abs(rightX - leftX);
+                let height = get_node_height(node);
+                ctx.fillRect(x * pixelRatio, get_node_top(node) * pixelRatio, width * pixelRatio, height * pixelRatio);
+            }
+        }
+
+        ctx.fillStyle = COLORS.nodes.selected;
+        for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+            let node = timeline.nodes.items[nodeIndex];
+            if (node.nodeInputState.selected) {
+                let width = (node.range[1] - node.range[0]);
+                let height = get_node_height(node);
+                ctx.strokeRect(node.range[0] * pixelRatio, get_node_top(node) * pixelRatio,
+                    width * pixelRatio,
+                    height * pixelRatio);
+            }
+        }
+
+        ctx.fillStyle = COLORS.nodes.endpoints;
+        render_adjusted_endpoints(ctx, timeline, pixelRatio, pointerStartPos, pointerPos, endpointIndex);
+
+        ctx.font = `${LAYER_HEIGHT * 0.5 * pixelRatio}px Sans-Serif`;
+        ctx.textBaseline = 'middle';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = COLORS.nodes.selected_foreground;
+        for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+            let node = timeline.nodes.items[nodeIndex];
+            if (node.nodeInputState.selected) {
+                let pointerDiff = (pointerPos[0] - pointerStartPos[0]);
+                let leftX = node.range[0] + (endpointIndex === 0? pointerDiff : 0);
+                let rightX = node.range[1] + (endpointIndex === 1? pointerDiff : 0);
+                let x = Math.min(leftX, rightX);
+                let width = Math.abs(rightX - leftX);
+                let height = get_node_height(node);
+                ctx.fillText(node.name, (x + width / 2) * pixelRatio,
+                    (get_node_top(node) + height / 2) * pixelRatio, width * pixelRatio);
+            }
+        }
+    } else if (timeline.inputMode.mode === InputMode.Create) {
+        ctx.fillStyle = COLORS.nodes.cloned;
+        let pointerStartPos = timeline.inputMode.pointerStartPos;
+        let pointerPos = inputState.pointerPos;
+        
+        let layer = y_to_layer(pointerStartPos[1]);
+        let leftX = Math.min(pointerStartPos[0], pointerPos[0]);
+        let rightX = Math.max(pointerStartPos[0], pointerPos[0]);
+
+        ctx.fillRect(leftX * pixelRatio, (layer_index_to_top(layer) + NODE_HPADDING) * pixelRatio, (rightX - leftX) * pixelRatio, get_node_height_for_layer(layer) * pixelRatio);
+
+    } else {
+        ctx.fillStyle = COLORS.nodes.selected;
+        for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+            let node = timeline.nodes.items[nodeIndex];
+            if (node.nodeInputState.selected) {
+                draw_node_background(timeline, node);
+            }
+        }
+
+        if (timeline.inputState.endpointsModifier) {
+            ctx.fillStyle = COLORS.nodes.endpoints;
+            render_standard_endpoints(ctx, timeline, pixelRatio);
+        }
+    }
+
+    ctx.font = `${LAYER_HEIGHT * 0.5 * pixelRatio}px Sans-Serif`;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = COLORS.nodes.foreground;
+    for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+        let node = timeline.nodes.items[nodeIndex];
+        let width = node.range[1] - node.range[0];
+        let height = get_node_height(node);
+        ctx.fillText(node.name, (node.range[0] + width / 2) * pixelRatio, (get_node_top(node) + height / 2) * pixelRatio, width * pixelRatio);
+    }
+
+    ctx.strokeStyle = COLORS.nodes.hover;
+    for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+        let node = timeline.nodes.items[nodeIndex];
+        if (node.nodeInputState.hovered) {
+            ctx.strokeRect(node.range[0] * pixelRatio,
+                get_node_top(node) * pixelRatio,
+                (node.range[1] - node.range[0]) * pixelRatio,
+                get_node_height(node) * pixelRatio);
+        }
+    }
+
+
+    if (timeline.inputMode.mode === InputMode.BoxSelect) {
+        ctx.strokeStyle = COLORS.box_select;
+        let pointerStartPos = timeline.inputMode.pointerStartPos;
+        let width = Math.abs(inputState.pointerPos[0] - pointerStartPos[0]);
+        let height = Math.abs(inputState.pointerPos[1] - pointerStartPos[1]);
+        ctx.strokeRect(Math.min(pointerStartPos[0], inputState.pointerPos[0]) * pixelRatio,
+            Math.min(pointerStartPos[1], inputState.pointerPos[1]) * pixelRatio,
+            width * pixelRatio,
+            height * pixelRatio);
     }
 }
 
-window.requestAnimationFrame(render_loop);
+function request_rerender (timeline : ITimeline) {
+    for (let inspector of timeline.inspectors) {
+        inspector.scheduleRender();
+    }
+    window.requestAnimationFrame(() => { render_loop(timeline) });
+}
+
+function edit_layer_function (timeline) {
+    return (event : Event) => {
+        let layer = parseInt((<HTMLInputElement>event.target).value) || 0;
+        perform_new_command_group(`Edit Layer to ${layer}`, ip_push_change_selection_layer_commands(layer, timeline, []), timeline);
+    }
+}
+
+function edit_name_function (timeline) {
+    return (event : Event) => {
+        let name = (<HTMLInputElement>event.target).value || '';
+        perform_new_command_group(`Edit Name to ${name}`, ip_push_change_selection_name_commands(name, timeline, []), timeline);
+    }
+}
+
+function edit_duration_function (timeline) {
+    return (event : Event) => {
+        let duration = parseInt((<HTMLInputElement>event.target).value) || 0;
+        if (Math.abs(duration) < 1) {
+            duration = 1;
+        }
+        perform_new_command_group(`Edit Duration to ${duration}`, ip_push_change_selection_duration_commands(duration, timeline, []), timeline);
+    }
+}
+
+function edit_start_function (timeline) {
+    return (event : Event) => {
+        let start = parseInt((<HTMLInputElement>event.target).value) || 0;
+        perform_new_command_group(`Edit Start to ${start}`, ip_push_change_selection_range_index_commands(0, start, timeline, []), timeline);
+    }
+}
+
+function edit_end_function (timeline) {
+    return (event : Event) => {
+        let end = parseInt((<HTMLInputElement>event.target).value) || 0;
+        perform_new_command_group(`Edit End to ${end}`, ip_push_change_selection_range_index_commands(1, end, timeline, []), timeline);
+    }
+}
+
+function h_number_scrubber (name: string, data: NumericData, edit_fn) {
+    let value = (data.max + data.min)/2;
+    let extents = data.max - value;
+    return h('div.number-scrubber', {key: name}, [
+        h('label', [name, ":"]),
+        h('input', { value: `${value}`, onchange: edit_fn }),
+        h('span.extents', ['±', extents])
+    ]);
+}
+
+interface NumericData {
+    min: number,
+    max: number
+}
+
+function update_numeric_data (data: NumericData, value: number) {
+    data.min = Number.isNaN(data.min)? value : Math.min(value, data.min);
+    data.max = Number.isNaN(data.max)? value : Math.max(value, data.max);
+}
+
+function render_inspector (timeline: ITimeline) : maquette.VNode {
+    let totalNodes = timeline.nodes.length;
+    let selectedNodes = 0;
+    // let rangeAverage = make_vector2(0,0);
+    let startData : NumericData = {min: NaN, max: NaN};
+    let endData : NumericData = {min: NaN, max: NaN};
+    let layerData : NumericData = {min: NaN, max: NaN};
+    let durationData : NumericData = {min: NaN, max: NaN};
+
+    let name = '';
+    let pointerPos = timeline.inputState.pointerPos;
+    for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+        let node = timeline.nodes.items[nodeIndex];
+        if (node.nodeInputState.selected) {
+            if (timeline.inputMode.mode === InputMode.Move) {
+                let pointerStartPos = timeline.inputMode.pointerStartPos;
+                let x = ((pointerPos[0] - pointerStartPos[0]) + node.range[0]);
+                let y = ((pointerPos[1] - pointerStartPos[1]) + layer_index_to_top(node.layer));
+                let width = (node.range[1] - node.range[0]);
+                let height = get_node_height(node);
+                let constrainedY = layer_index_to_top(y_to_layer(y));
+                update_numeric_data(startData, x);
+                update_numeric_data(endData, x + width);
+                update_numeric_data(layerData, y_to_layer(y));
+            } else {
+                update_numeric_data(startData, node.range[0]);
+                update_numeric_data(endData, node.range[1]);
+                update_numeric_data(layerData, node.layer);
+            }
+            update_numeric_data(durationData, node.range[1] - node.range[0]);
+            name = node.name;
+            selectedNodes++;
+        } 
+    }
+
+    let edit_layer = timeline.inspectorFunctions.edit_layer;
+    let edit_name = timeline.inspectorFunctions.edit_name;
+    let edit_duration = timeline.inspectorFunctions.edit_duration;
+    let edit_start = timeline.inspectorFunctions.edit_start;
+    let edit_end = timeline.inspectorFunctions.edit_end;
+
+    return h('div', [h('p', ['Total Nodes: ', totalNodes]),
+                     h('p', ['Selected Nodes: ', selectedNodes]),
+                     h('input', { value: `${name}`, onchange: edit_name, /*oninput: edit_name*/ }),
+                     selectedNodes > 0? [h_number_scrubber('Layer', layerData, edit_layer),
+                     h_number_scrubber('Start', startData, edit_start),
+                     h_number_scrubber('End', endData, edit_end),
+                     h_number_scrubber('Duration', durationData, edit_duration)]: [],
+                     ]);
+}
+
+function init () {
+    let timelineElems: HTMLCollectionOf<Element> = document.getElementsByClassName('js-timeline');
+    let timelines: ITimeline[] = [];
+    for (let i = 0; i < timelineElems.length; i++) {
+        let timelineElem = timelineElems[i];
+
+        let timeline = make_timeline(<HTMLCanvasElement>timelineElem);
+
+        let inspectorElems = document.getElementsByClassName('js-timeline-inspector');
+        for (let i = 0; i < inspectorElems.length; i++) {
+            attach_inspector_to_timeline(inspectorElems[i], timeline);
+        }
+        timelines.push(timeline);
+    }
+
+    window.addEventListener('resize', () => {
+        for (let timeline of timelines) {
+            resize_timeline(timeline);
+        }
+    });
+
+    // requirejs(["helper/util"], function(util) {
+    //     //This function is called when scripts/helper/util.js is loaded.
+    //     //If util.js calls define(), then this function is not fired until
+    //     //util's dependencies have loaded, and the util argument will hold
+    //     //the module value for "helper/util".
+    // });
+
+    for (let timeline of timelines) {
+        request_rerender(timeline);
+    }
+}
+
+init();
